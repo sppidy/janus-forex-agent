@@ -3,7 +3,7 @@
 import os
 import time
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import yfinance as yf
 import pandas as pd
@@ -16,78 +16,16 @@ from strategy import get_latest_signal, get_scored_signal
 from learner import log_trade, record_outcome, get_snapshot, generate_lessons, print_performance_report
 from predictor import predict, train_model, should_retrain
 from logger import logger
-from market_calendar import now_et as now_ist, is_market_open, get_active_sessions, time_to_market_open, MARKET_OPEN_TIME, MARKET_CLOSE_TIME
+from market_calendar import now_et as now_ist, is_market_open, get_active_sessions, time_to_market_open
 from persistence import read_json, write_json_atomic
 
 
-def is_market_open() -> bool:
-    """Check if Indian stock market is currently open."""
-    t = now_ist()
-    # Weekday check (Mon=0, Fri=4)
-    if t.weekday() > 4:
-        return False
-    if not is_market_trading_day(t.date()):
-        return False
-    market_open = t.replace(
-        hour=MARKET_OPEN_TIME.hour,
-        minute=MARKET_OPEN_TIME.minute,
-        second=0,
-        microsecond=0,
-    )
-    market_close = t.replace(
-        hour=MARKET_CLOSE_TIME.hour,
-        minute=MARKET_CLOSE_TIME.minute,
-        second=0,
-        microsecond=0,
-    )
-    return market_open <= t <= market_close
-
-
-def time_to_market_open() -> timedelta | None:
-    """Get time remaining until market opens. None if open."""
-    if is_market_open():
-        return None
-    t = now_ist()
-    today_open = t.replace(
-        hour=MARKET_OPEN_TIME.hour,
-        minute=MARKET_OPEN_TIME.minute,
-        second=0,
-        microsecond=0,
-    )
-    if t < today_open and is_market_trading_day(t.date()):
-        return today_open - t
-    # Next verified market session day
-    days_ahead = 1
-    while True:
-        next_day = t + timedelta(days=days_ahead)
-        if is_market_trading_day(next_day.date()):
-            next_open = next_day.replace(
-                hour=MARKET_OPEN_TIME.hour,
-                minute=MARKET_OPEN_TIME.minute,
-                second=0,
-                microsecond=0,
-            )
-            return next_open - t
-        days_ahead += 1
-
-
-# Candidate pool for trending stock scanner
-SCAN_POOL = [
-    "TATAPOWER.NS", "BPCL.NS", "GAIL.NS", "COALINDIA.NS", "NTPC.NS",
-    "BANKBARODA.NS", "CANBK.NS", "INDIANB.NS", "UNIONBANK.NS",
-    "RECLTD.NS", "PFC.NS", "BHEL.NS", "BEL.NS",
-    "IRCTC.NS", "RVNL.NS", "SUZLON.NS", "YESBANK.NS",
-    "JIOFIN.NS", "ADANIPOWER.NS", "ADANIGREEN.NS",
-    "TTML.NS", "HFCL.NS", "NBCC.NS", "NCC.NS",
-    "HUDCO.NS", "SJVN.NS", "JSWENERGY.NS",
-    "ITC.NS", "SBIN.NS", "TATASTEEL.NS", "WIPRO.NS",
-    "PNB.NS", "NHPC.NS", "IRFC.NS", "SAIL.NS", "IOC.NS", "IDEA.NS",
-]
+SCAN_POOL = list(config.WATCHLIST)
 
 # Max watchlist size — keep it manageable for API quotas
-MAX_WATCHLET = 20
-MIN_WATCHLET = 10
-WATCHLET_STATE_FILE = os.path.join(config.PROJECT_DIR, "watchlist_state.json")
+MAX_WATCHLIST_SIZE = 20
+MIN_WATCHLIST_SIZE = 10
+WATCHLIST_STATE_FILE = os.path.join(config.PROJECT_DIR, "watchlist_state.json")
 MAX_DAILY_DRAWDOWN_PCT = 3.5
 SYMBOL_COOLDOWN_MIN = 45
 
@@ -154,7 +92,7 @@ def scan_trending_stocks(held_symbols: set[str] | None = None, cycle_num: int = 
         held_symbols = set()
 
     logger.info("  [SCAN] Scanning NSE for trending stocks...")
-    state = read_json(WATCHLET_STATE_FILE, default={})
+    state = read_json(WATCHLIST_STATE_FILE, default={})
     held_cycles = state.get("hold_cycles", {})
     results = []
     for sym in SCAN_POOL:
@@ -184,12 +122,12 @@ def scan_trending_stocks(held_symbols: set[str] | None = None, cycle_num: int = 
     results.sort(key=lambda x: x["score"], reverse=True)
 
     # Update watchlist
-    current = set(config.WATCHLET)
+    current = set(config.WATCHLIST)
     added = []
     for r in results:
         if r["sym"] in held_symbols:
             continue
-        if r["sym"] not in current and len(current) < MAX_WATCHLET:
+        if r["sym"] not in current and len(current) < MAX_WATCHLIST_SIZE:
             current.add(r["sym"])
             added.append(r["sym"])
             held_cycles[r["sym"]] = cycle_num
@@ -214,18 +152,18 @@ def scan_trending_stocks(held_symbols: set[str] | None = None, cycle_num: int = 
                 logger.warning(f"  [SCAN] Could not re-evaluate {sym} for removal")
 
     for sym in cold:
-        if len(current) > MIN_WATCHLET:  # Keep at least minimum basket breadth
+        if len(current) > MIN_WATCHLIST_SIZE:  # Keep at least minimum basket breadth
             current.discard(sym)
             held_cycles.pop(sym, None)
             logger.info(f"  [SCAN] - {sym}: removed (cold)")
 
-    config.WATCHLET = list(current)
-    write_json_atomic(WATCHLET_STATE_FILE, {
-        "watchlist": config.WATCHLET,
+    config.WATCHLIST = list(current)
+    write_json_atomic(WATCHLIST_STATE_FILE, {
+        "watchlist": config.WATCHLIST,
         "hold_cycles": held_cycles,
         "updated_at": now_ist().isoformat(),
     })
-    logger.info(f"  [SCAN] Watchlist: {len(config.WATCHLET)} stocks")
+    logger.info(f"  [SCAN] Watchlist: {len(config.WATCHLIST)} stocks")
     return added
 
 
@@ -267,7 +205,7 @@ def run_trading_cycle(
 
         if not signals:
             logger.info("  [AI] No AI signals returned. Running multi-indicator fallback...")
-            for symbol in config.WATCHLET:
+            for symbol in config.WATCHLIST:
                 df = get_historical_data(symbol, period="30d", interval="1d")
                 if df.empty:
                     continue
@@ -301,7 +239,7 @@ def run_trading_cycle(
                 ml_mature = latest_accuracy >= 75  # only trust ML above 75% accuracy (learning mode until proven)
                 logger.info(f"  [ML] Model accuracy: {latest_accuracy}% — {'ACTIVE (influencing trades)' if ml_mature else 'OBSERVING ONLY (too immature)'}")
 
-        for symbol in config.WATCHLET:
+        for symbol in config.WATCHLIST:
             df = get_historical_data(symbol, period="60d", interval="1d")
             if not df.empty:
                 pred = predict(symbol, df)
@@ -384,7 +322,7 @@ def run_trading_cycle(
         generate_lessons()
     else:
         # Rule-based signals (no API calls)
-        for symbol in config.WATCHLET:
+        for symbol in config.WATCHLIST:
             trader.refresh_portfolio()
             df = get_historical_data(symbol, period="30d", interval="1d")
             if df.empty:
@@ -431,7 +369,7 @@ def run_autopilot(interval_min: int = 15, use_ai: bool = True, force: bool = Fal
   Strategy:    {mode}
   Interval:    Every {interval_min} minutes
   Capital:     ${config.INITIAL_CAPITAL}
-  Watchlist:   {len(config.WATCHLET)} stocks
+  Watchlist:   {len(config.WATCHLIST)} stocks
   Market:      9:15 AM - 3:30 PM ET
   Force mode:  {'ON (runs outside market hours)' if force else 'OFF'}
 {'='*60}
@@ -446,11 +384,11 @@ def run_autopilot(interval_min: int = 15, use_ai: bool = True, force: bool = Fal
     SCAN_EVERY_N_CYCLES = 3  # Every 3 cycles = 45 min at 15-min interval
 
     # Restore persisted watchlist from last session (scan_trending_stocks saves it)
-    saved_state = read_json(WATCHLET_STATE_FILE, default={})
+    saved_state = read_json(WATCHLIST_STATE_FILE, default={})
     saved_watchlist = saved_state.get("watchlist")
-    if saved_watchlist and isinstance(saved_watchlist, list) and len(saved_watchlist) >= MIN_WATCHLET:
-        config.WATCHLET = saved_watchlist
-        logger.info(f"  [SCAN] Restored watchlist from last session: {len(config.WATCHLET)} stocks")
+    if saved_watchlist and isinstance(saved_watchlist, list) and len(saved_watchlist) >= MIN_WATCHLIST_SIZE:
+        config.WATCHLIST = saved_watchlist
+        logger.info(f"  [SCAN] Restored watchlist from last session: {len(config.WATCHLIST)} stocks")
     day_start_equity: float | None = None
     day_ref: datetime.date | None = None
     symbol_cooldown: dict[str, datetime] = {}

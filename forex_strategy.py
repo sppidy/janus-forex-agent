@@ -62,32 +62,34 @@ def _get_asian_range(df: pd.DataFrame) -> AsianRange | None:
     if df.empty or len(df) < 10:
         return None
 
-    # Ensure we have timezone-aware index or convert
+    # data_fetcher strips timezone from index, so work with naive datetimes
     idx = df.index
     if hasattr(idx, 'tz') and idx.tz is not None:
         try:
             idx = idx.tz_convert(ET)
         except Exception:
             pass
-    df = df.copy()
-    df.index = idx
+        df = df.copy()
+        df.index = idx
 
     now = datetime.now(ET)
-    # Today's Asian session was last night (7 PM - midnight)
     asian_date = now.date()
-    asian_start_dt = datetime.combine(asian_date - timedelta(days=1), ASIAN_START, tzinfo=ET)
-    asian_end_dt = datetime.combine(asian_date, ASIAN_END, tzinfo=ET)
 
-    # Filter candles in the Asian session window
+    if hasattr(df.index, 'tz') and df.index.tz is not None:
+        asian_start_dt = datetime.combine(asian_date - timedelta(days=1), ASIAN_START, tzinfo=ET)
+        asian_end_dt = datetime.combine(asian_date, ASIAN_END, tzinfo=ET)
+    else:
+        asian_start_dt = datetime.combine(asian_date - timedelta(days=1), ASIAN_START)
+        asian_end_dt = datetime.combine(asian_date, ASIAN_END)
+
     try:
         mask = (df.index >= asian_start_dt) & (df.index <= asian_end_dt)
         asian_candles = df[mask]
     except Exception:
-        # If index comparison fails (naive vs aware), try by hour
         asian_candles = df[
             ((df.index.hour >= 19) & (df.index.hour <= 23)) |
             (df.index.hour == 0)
-        ].tail(20)  # Rough filter
+        ].tail(20)
 
     if asian_candles.empty or len(asian_candles) < 2:
         return None

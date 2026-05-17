@@ -74,9 +74,9 @@ def analyze_pair(symbol: str, df: pd.DataFrame) -> SweepSignal | None:
     if range_size <= 0:
         return None
 
-    # Check recent candles for breakout
+    # Check recent candles for breakout (most recent first)
     recent = df.tail(20)
-    for i in range(len(recent)):
+    for i in range(len(recent) - 1, -1, -1):
         close = float(recent["Close"].iloc[i])
         high = float(recent["High"].iloc[i])
         low = float(recent["Low"].iloc[i])
